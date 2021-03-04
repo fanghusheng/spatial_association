@@ -1,0 +1,429 @@
+function removeCloud(image){
+  var qa=image.select('pixel_qa');
+  var cloudShadow=(1<<3);
+  var cloud=(1<<5);
+  var mask=qa.bitwiseAnd(cloudShadow).eq(0).and(qa.bitwiseAnd(cloud).eq(0));
+  return image.updateMask(mask);
+}
+
+// function removeCloud(image){
+//   var cloud = ee.Algorithms.Landsat.simpleCloudScore(image).select("cloud");
+//   var mask = cloud.lt(10);
+//   return image.updateMask(mask);
+// }
+
+//NDVI
+function ND(image){
+  var ndvi=image.normalizedDifference(['B5','B4']).rename('ndvi');
+  var ndwi=image.normalizedDifference(['B3','B5']).rename('ndwi');
+  var ndbi=image.normalizedDifference(['B6','B5']).rename('ndbi');
+  return image.addBands(ndvi).addBands(ndwi).addBands(ndbi);
+  } 
+// print(NDCollection);
+
+////缩放
+function scaleImage(image){
+  var time_start = image.get("system:time_start");
+  image = image.multiply(0.0001);
+  image = image.set("system:time_start", time_start);
+  return image;
+}
+
+var selectbands = [
+ 
+  "B1", "B2", "B3", "B4", "B5", "B6", "B7",
+ 
+  "ndbi", "ndwi", "ndvi"
+ 
+];
+
+var L8=ee.ImageCollection('LANDSAT/LC08/C01/T1_SR').filterBounds(wuhan)
+                          // .filter(ee.Filter.lte('CLOUD_COVER',10))
+                          // .sort('CLOUD_COVER')
+                          .map(removeCloud)
+                          .map(scaleImage)
+                          .map(ND)
+                          // .limit(100)
+                          .select(selectbands);
+// var year2014=L8.filterDate('2014-01-01','2014-12-30').limit(100,'CLOUD_COVER').median().clip(wuhan)  ;
+// var year2015=L8.filterDate('2015-01-01','2015-12-30').limit(100,'CLOUD_COVER').median().clip(wuhan)  ;
+// var year2016=L8.filterDate('2016-01-01','2016-12-30').limit(100,'CLOUD_COVER').median().clip(wuhan)  ;
+// var year2017=L8.filterDate('2017-01-01','2017-12-30').limit(100,'CLOUD_COVER').median().clip(wuhan)  ;
+var year2014=L8.filterDate('2014-01-01','2014-12-30').median().clip(wuhan)  ;
+var year2015=L8.filterDate('2015-01-01','2015-12-30').median().clip(wuhan)  ;
+var year2016=L8.filterDate('2016-01-01','2016-12-30').median().clip(wuhan)  ;
+var year2017=L8.filterDate('2017-01-01','2017-12-30').median().clip(wuhan)  ;
+var imageCollection=ee.ImageCollection.fromImages([year2014, year2015, year2016, year2017]);
+
+//filter image(replace code up of this)
+// var imageCollection=[];
+// for(var year=2014;i<2018;i++){
+//   imageCollection.push(L8.filter(ee.Filter.calendarRange(year,year,'year')));
+// }
+// imageCollection=ee.ImageCollection(imageCollection).mean().clip(wuhan);
+
+
+Map.centerObject(wuhan,9);
+// Map.addLayer(year2014,{min:0,max:0.3,bands:['B4','B3','B2']},'l81');
+// Map.addLayer(year2015,{min:0,max:0.3,bands:['B4','B3','B2']},'l82');
+// Map.addLayer(year2016,{min:0,max:0.3,bands:['B4','B3','B2']},'l83');
+// Map.addLayer(year2017,{min:0,max:0.3,bands:['B4','B3','B2']},'l84');
+// Map.addLayer(imageCollection.first(),{min:0,max:3000,bands:['B4','B3','B2']},'l8');
+//Map.addLayer(wuhan,{},'wuhan');
+
+
+Map.addLayer(imageCollection.first().select('ndvi'),{min:-0,max:0.8,palette: [
+      'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718',
+      '74A901', '66A000', '529400', '3E8601', '207401', '056201',
+      '004C00', '023B01', '012E01', '011D01', '011301'
+  ]
+  },'ndvi');
+// Map.addLayer(imageCollection.first().select('ndwi'),{min:0,max:0.8},'ndwi');
+
+//classfication
+var polygons1=ee.FeatureCollection([urban,water,forest,cropland]);
+// print('polygons',polygons1);
+var polygons2=ee.FeatureCollection([u2,w2,f2,c2]);
+// print('polygons2',polygons2);
+var polygons3=ee.FeatureCollection([u3,w3,f3,c3]);
+var polygons4=ee.FeatureCollection([u4,w4,f4,c4]);
+
+var polygons=ee.List([]);
+polygons=polygons.add(polygons1).add(polygons2).add(polygons3).add(polygons4);
+print('polygons',polygons);
+
+
+function classification(image,fc){
+  // var training=image.sampleRegions({
+  //   collection:polygons,
+  //   properties:['class'],
+  //   scale:30,
+  // });
+  
+  var randomForest=ee.Classifier.smileRandomForest(20);
+  // var randomForest=ee.Classifier.smileNaiveBayes();
+  var bands=image.bandNames();
+  var withRandom=fc.randomColumn('random');
+  var split=0.7;
+  var trainPart=withRandom.filter(ee.Filter.lt('random',split));
+  var testPart=withRandom.filter(ee.Filter.gte('random',split));
+  var trained=randomForest.train(trainPart,'class',bands);
+  // print('trained',trained.explain());//cart 和randomForest可以输出特征重要性信息
+  var result=image.classify(trained);
+  // 分类测试数据集
+  var test =testPart.classify(trained);
+  //print(test)
+
+  // 计算混淆矩阵
+  var confusionMatrix = test.errorMatrix('class', 'classification');
+  // print('Confusion Matrix', confusionMatrix);
+  // print('kappa:',confusionMatrix.kappa(),trained.confusionMatrix().kappa());
+  // print('result',result);
+  return result;
+}
+
+var imageList=ee.List(imageCollection.toList(4));
+
+//注意这里采样在同一张影像上，用于训练和测试（有些不合理），可以换影像get(i)测试kappa系数  
+//已修正
+var training=ee.List([]);
+for(var i=0;i<4;i++){
+  var training_=ee.Image(imageList.get(i)).sampleRegions({
+    collection:ee.FeatureCollection(polygons.get(i)),
+    properties:['class'],
+    scale:30,
+  });
+  training=training.add(training_);
+}
+// print('training',training);
+
+// var class2014=classification(ee.Image(imageList.get(0)),training);
+// Map.addLayer(class2014,{min:0,max:3,palette:['#d63000','#1b26f0','#047529','#96ffa5']},'classify');
+
+// var classifyImage=ee.ImageCollection(imageCollection).map(classification);
+
+
+var classifyImg=[];
+for(var i=0;i<4;i++){
+  var image=ee.Image(imageList.get(i));
+  var training_=ee.FeatureCollection(training.get(i));
+  var classied=classification(image,training_);
+  // print('calssied',classied);
+  classifyImg.push(ee.Image(classied));
+  // Map.addLayer(classied,{min:0,max:3,palette:['#d63000','#1b26f0','#047529','#96ffa5']},'classify'+i);
+}
+var classifiedImg=ee.ImageCollection.fromImages(classifyImg);
+// print('classifyImg',classifyImg,classifiedImg.size().getInfo());
+
+
+// export to asset for subsequent process
+//GEE不提供下载影像集合collection的函数。但是网上有调用的接口，我们把接口加载进去
+//第一种是导出到Assets，第二种是导出到Drive里面。
+
+// var batch=require('users/fitoprincipe/geetools:batch');
+// batch.Download.ImageCollection.toAsset({
+//   //collection:ee.ImageCollection(classifyImg),
+//   collection:classifiedImg,
+//   folder:'LSTA',
+//   option:{
+//     scale:30,
+//     region:wuhan,
+//     maxPixels:1e13,
+//     type:'int32',
+//   }
+// });
+
+
+// function exportImageCollection(imgCol) {
+//   var indexList = imgCol.reduceColumns(ee.Reducer.toList(), ["system:index"])
+//                         .get("list");
+ 
+//   indexList.evaluate(function(indexs) {
+ 
+//     for (var i=0; i<indexs.length; i++) {
+ 
+//       //var image = imgCol.filter(ee.Filter.eq("system:index", indexs[i])).first();
+//       image=ee.Image(imgCol.toList(4).get(i));
+//       image = image.toInt16();
+ 
+//       Export.image.toAsset({
+//         image: image.clip(wuhan),
+//         description: indexs[i],
+//         // fileNamePrefix: indexs[i],
+//         region: wuhan,
+//         scale: 30,
+//         crs: "EPSG:4326",
+//         maxPixels: 1e13
+//       });
+//     }
+//   });
+// }
+// exportImageCollection(classifiedImg);
+
+
+//neighborhood statistic
+
+//neighborhood shape and neighborhood size
+// var kernel=ee.Kernel.square(1,'pixels',false);
+var kernel=ee.Kernel.square(1,'pixels',false);
+
+//计算单张影像各类地物领域内像素值个数
+function pixelNum(image){
+  var u=image.eq(0).reduceNeighborhood(ee.Reducer.sum(),kernel).rename('u');
+  var w=image.eq(1).reduceNeighborhood(ee.Reducer.sum(),kernel).rename('w');
+  var f=image.eq(2).reduceNeighborhood(ee.Reducer.sum(),kernel).rename('f');
+  var c=image.eq(3).reduceNeighborhood(ee.Reducer.sum(),kernel).rename('c');
+  //var neiborCount=image.reduceNeighborhood(ee.Reducer.count(),kernel).rename('neiborCount');
+  var neighborCount=ee.Image(9).rename('neighborCount').clip(wuhan);
+  
+  //each class total pixels
+  var uCount=image.eq(0).selfMask().reduceRegion({
+    reducer:ee.Reducer.count(),
+    geometry:wuhan,
+    scale:30,
+    maxPixels:1e13
+  }).get('classification');
+  // print(uCount);
+  uCount=ee.Image(ee.Number(uCount)).clip(wuhan).rename('uCount');
+  
+  var wCount=image.eq(1).selfMask().reduceRegion({
+    reducer:ee.Reducer.count(),
+    geometry:wuhan,
+    scale:30,
+    maxPixels:1e13
+  }).get('classification');
+  wCount=ee.Image(ee.Number(wCount)).clip(wuhan).rename('wCount');
+  
+  var fCount=image.eq(2).selfMask().reduceRegion({
+    reducer:ee.Reducer.count(),
+    geometry:wuhan,
+    scale:30,
+    maxPixels:1e13
+  }).get('classification');
+  fCount=ee.Image(ee.Number(fCount)).clip(wuhan).rename('fCount');
+  
+  var cCount=image.eq(3).selfMask().reduceRegion({
+    reducer:ee.Reducer.count(),
+    geometry:wuhan,
+    scale:30,
+    maxPixels:1e13
+  }).get('classification');
+  cCount=ee.Image(ee.Number(cCount)).clip(wuhan).rename('cCount');
+  
+  //total pixels in wuhan
+  var total=image.reduceRegion({
+    reducer:ee.Reducer.count(),
+    geometry:wuhan,
+    scale:30,
+    maxPixels:1e13,
+  }).get('classification');
+  total=ee.Image(ee.Number(total)).clip(wuhan).rename('total');
+  
+  return u.addBands(w).addBands(f).addBands(c).addBands(neighborCount)
+          .addBands(uCount).addBands(wCount).addBands(fCount).addBands(cCount)
+          .addBands(total);
+}
+
+var pixelNumImg=classifyImg.map(pixelNum);
+// print('pixelNumImg',pixelNumImg);
+
+var Img=ee.Image(ee.List(pixelNumImg).get(0));
+// Map.addLayer(Img,{min:0,max:9,plaette:'FFFFFF, CE7E45, DF923D, F1B555, FCD163, 99B718, 74A901, 66A000, 529400'},'pixelNum');
+
+//time windows:one year,two year,three year
+var one_year=ee.Image(ee.List(pixelNumImg).get(2));
+var two_year=one_year.add(ee.Image(ee.List(pixelNumImg).get(1)));
+var three_year=two_year.add(ee.Image(ee.List(pixelNumImg).get(0)));
+// print('time window',one_year,two_year,three_year);
+// Map.addLayer(three_year,{min:0,max:27},'time 3 window');
+
+//compute NAI
+function NAI(image){
+  var u_NAI=image.expression('(nk/n)/(Nk/N)',{
+    nk:image.select('u'),
+    n:image.select('neighborCount'),
+    Nk:image.select('uCount'),
+    N:image.select('total'),
+  });
+  
+  var w_NAI=image.expression('(nk/n)/(Nk/N)',{
+    nk:image.select('w'),
+    n:image.select('neighborCount'),
+    Nk:image.select('wCount'),
+    N:image.select('total'),
+  });
+  
+  var f_NAI=image.expression('(nk/n)/(Nk/N)',{
+    nk:image.select('f'),
+    n:image.select('neighborCount'),
+    Nk:image.select('fCount'),
+    N:image.select('total'),
+  });
+  
+  var c_NAI=image.expression('(nk/n)/(Nk/N)',{
+    nk:image.select('c'),
+    n:image.select('neighborCount'),
+    Nk:image.select('cCount'),
+    N:image.select('total'),
+  });
+  
+  return image.select().addBands(u_NAI).addBands(w_NAI).addBands(f_NAI).addBands(c_NAI);
+}
+
+var NAI1year=NAI(one_year);
+var NAI2year=NAI(two_year);
+var NAI3year=NAI(three_year);
+// print('NAI3year',NAI3year);
+// Map.addLayer(NAI3year,{min:0,max:5},'NAI3year');
+
+
+
+var newCity=ee.Image(ee.List(classifyImg).get(2)).neq(0).and(ee.Image(ee.List(classifyImg).get(3)).eq(0)).rename('newCity');
+
+// var City16=ee.Image(ee.List(classifyImg).get(2)).eq(0);
+// var City17=ee.Image(ee.List(classifyImg).get(3)).eq(0);
+
+// Map.addLayer(newCity.selfMask(),{palette:'red'},'newCity');
+// Map.addLayer(City16,{min:0,max:1},'City16');
+// Map.addLayer(City17,{min:0,max:1},'City17');
+
+
+//采样中的问题，大多数是稳定不变的像素，不在这上面采样
+//在变化的土地中，分为两类，其他变为城市（1），剩下的类型转换（0）
+var changed=ee.Image(ee.List(classifyImg).get(2)).neq(ee.Image(ee.List(classifyImg).get(3))).rename('changed');
+var non_newCity=changed.neq(newCity);
+Map.addLayer(changed.selfMask(),{palette:'green'},'changed');
+Map.addLayer(non_newCity.selfMask(),{palette:'blue'},'non_newCity');
+// Map.addLayer(newCity.selfMask(),{palette:'red'},'newCity');
+Map.addLayer(wuhanNonNewCity.selfMask(),{palette:'red'},'wuhanNonNewCity');
+
+var image=NAI3year.addBands(newCity);
+print('sampleimage',image);
+
+Export.image.toAsset({
+  image:image,
+  description:'neighbor_square_1',
+  scale:30,
+  // crs:'EPSG:4326',
+  maxPixels:1e13
+});
+// Map.addLayer(image.select(4).selfMask(),{palette:'green'},'test');
+
+
+
+//end   please to vectorSample code page
+
+
+
+// var points=ee.FeatureCollection.randomPoints({
+//   region:wuhan,
+//   points:10000,
+//   seed:0,
+// });
+
+// var bounds=newCity.selfMask().reduceToVectors({scale:30,maxPixels:1e13}).limit(1000);
+
+// var pointsFilter=points.filterBounds(bounds);
+
+// Map.addLayer(pointsFilter,{},'points');
+
+// var sampleRegion=image.eq(1).selfMask().sampleRegions({
+//   collection:points,
+//   scale:30,
+// })//.map(function(feature){
+//   // return feature.set('constant',1);
+// // });
+
+
+// var city_sample=image.sampleRegions({
+//   collection:city_points,
+//   scale:30,
+// });
+// var noncity_sample=image.sampleRegions({
+//   collection:non_newcity,
+//   scale:30,
+// });
+
+// print('sampleregion',noncity_sample);
+// print('total sample num of classification=1:',sampleRegion.aggregate_sum('classification'));
+
+// Export.table.toDrive({
+//   collection:city_sample,
+//   description:'city_sample',
+//   fileFormat:'CSV',
+// });
+// Export.table.toDrive({
+//   collection:noncity_sample,
+//   description:'noncity_sample',
+//   fileFormat:'CSV',
+// });
+
+
+
+// 犯了一个错误，逻辑回归中线性方程中的自变量y取值不应该是0或1，是概率比（0到无穷大）
+// 这个概率比要待定系数计算，而待定系数又是要求解的，所以无法使用LS计算
+
+// var lr2=sampleRegion.reduceColumns({
+//   reducer:ee.Reducer.linearRegression({
+//     numX:5,
+//     numY:1,
+//     // beta:1
+//   }),
+//   selectors:['constant','u','w','f','c','classification'],
+// });
+// print(lr2);
+
+// var beta=lr2.get('coefficients');
+// print('beta',beta,typeof(beta));
+
+// //predict
+// var predict=image.expression('-0.11266+0.02744*u+0.02250*w+0.01629*f+0.09594*c',{
+//   u:image.select('u'),
+//   w:image.select('w'),
+//   f:image.select('f'),
+//   c:image.select('c'),
+// });
+// Map.addLayer(predict,{min:0,max:1},'predict');
+
+// var p_img=predict.exp().divide(ee.Image(1).clip(wuhan).add(predict.exp()));
+// Map.addLayer(p_img.gt(0.5),{min:0,max:1},'p_img');
